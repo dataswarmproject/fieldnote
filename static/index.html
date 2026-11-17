@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Fieldnote · Local evidence workspace</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to workspace</a>
+  <header class="mast">
+    <div class="mast-inner">
+      <a href="#workbench" class="brand" aria-label="Fieldnote workbench"><span class="mark" aria-hidden="true"><i></i></span>Fieldnote</a>
+      <nav aria-label="Workspace views">
+        <a href="#workbench" aria-current="page">Workbench</a>
+        <a href="#benchmark">Benchmark</a>
+        <a href="#sources">Sources</a>
+      </nav>
+      <span class="local-label">Local workspace</span>
+    </div>
+  </header>
+  <main class="layout" id="main" tabindex="-1">
+    <div class="primary">
+      <section id="workbench-view" aria-labelledby="workbench-heading">
+        <div class="page-title"><h1 id="workbench-heading">Query workbench</h1><p>Ask your indexed folder a question and compare answers side by side.</p></div>
+        <form id="ask-form" class="composer">
+          <label for="question" class="label">Your question</label>
+          <textarea id="question" required maxlength="4000" rows="3" dir="auto" placeholder="Ask about a document, a spreadsheet, or both…"></textarea>
+          <div class="composer-actions"><span id="ask-scope" class="scope">Waiting for index</span><button class="primary-btn" id="ask-button" type="submit">Compare answers <span aria-hidden="true">↗</span></button></div>
+        </form>
+        <p id="ask-message" class="message" role="status"></p>
+        <section id="answers" class="result-section" hidden aria-labelledby="answers-title">
+          <div class="section-title"><h2 id="answers-title">Answers</h2><span class="stamp" id="ask-snapshot"></span></div>
+          <p class="asked" id="asked-question" dir="auto"></p><div id="answer-grid" class="answer-grid"></div>
+        </section>
+        <section id="suggestions" hidden><h2 class="small-heading">Example questions</h2><div id="examples" class="questions"></div></section>
+      </section>
+      <section id="benchmark-view" aria-labelledby="benchmark-heading" hidden>
+        <div class="page-title"><h1 id="benchmark-heading">Benchmark</h1><p>Run both methods on the same questions and source snapshot. The grader compares their answers with your references.</p></div>
+        <form class="suite" id="bench-form">
+          <label for="suite" class="label">Question set</label>
+          <select id="suite"><option value="demo">Bundled demo questions</option><option value="custom">Custom questions</option></select>
+          <p class="field-note" id="suite-note">The bundled references apply to the demo folder.</p>
+          <div id="custom-block" hidden>
+            <div class="section-title"><h2 class="custom-title">Your questions</h2><button type="button" id="switch-editor" class="text-btn">Edit as JSON</button></div>
+            <div id="field-editor"><div id="case-list"></div><button type="button" id="add-case" class="outline-btn">Add question</button></div>
+            <div id="json-editor" hidden><label class="label" for="cases">Questions and answers · JSON array</label>
+              <textarea id="cases" rows="9" spellcheck="false"></textarea>
+              <p class="field-note">Paste a list with question, expected, and optional aliases for each entry.</p>
+            </div>
+          </div>
+          <details class="grading"><summary>How grading works</summary><p>Raw value matches count answer text that matches a reference or alias. Coverage-qualified accuracy also requires an answered status. A partial answer can therefore match the value and still score zero on qualified accuracy. Both measures include every question in the denominator. Matching normalizes Unicode, letter case, whitespace, and trailing sentence punctuation. Review citations separately to judge evidential support.</p></details>
+          <div class="suite-action"><button type="submit" class="primary-btn" id="run-bench">Run benchmark <span aria-hidden="true">↗</span></button></div>
+        </form>
+        <p id="bench-message" class="message" role="status"></p>
+        <section id="benchmark-results" hidden><div class="section-title"><h2>Results</h2><span id="bench-snapshot" class="stamp"></span><button type="button" id="download" class="outline-btn">Download results</button></div><div id="scoreboard" class="answer-grid"></div><h3 class="small-heading">Question results</h3><div id="bench-runs"></div></section>
+      </section>
+      <section id="sources-view" aria-labelledby="sources-heading" hidden>
+        <div class="page-title"><h1 id="sources-heading">Source inventory</h1><p>Inspect the indexed files, extracted units, and reading issues in this snapshot.</p></div>
+        <div id="inventory"></div>
+      </section>
+    </div>
+    <aside aria-label="Workspace configuration">
+      <section class="index-card">
+        <div class="aside-heading"><span class="folder-icon" aria-hidden="true"></span><h2>Folder index</h2></div>
+        <p id="active-folder" class="current-folder">Checking workspace…</p>
+        <div id="metrics" class="stats" aria-label="Index totals"></div>
+        <form id="folder-form">
+          <label for="folder" class="label">Local folder path</label>
+          <div class="path-control"><input id="folder" required type="text" autocomplete="off" placeholder="Enter folder path" dir="auto"><button id="browse" type="button" class="quiet">Browse</button></div>
+          <div class="index-actions"><button id="index-button" type="submit" class="outline-btn">Index folder</button><button id="demo-button" type="button" class="text-btn" hidden>Use demo folder</button></div>
+        </form>
+        <p id="folder-message" class="message" role="status"></p>
+      </section>
+      <section class="runtime"><div class="section-title"><h2>Model runtime</h2><span id="runtime-state" class="pill">Checking</span></div>
+        <p id="model-name"></p><p id="model-detail" class="muted"></p>
+        <button id="refresh-runtime" type="button" class="text-btn" hidden>Check connection</button><p id="runtime-message" class="message" role="status"></p>
+      </section>
+    </aside>
+  </main>
+</body>
+</html>

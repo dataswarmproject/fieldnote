@@ -1,0 +1,36 @@
+[
+  {
+    "question": "How many suppliers have Status = Eligible?",
+    "expected": "32",
+    "aliases": []
+  },
+  {
+    "question": "What is the Site for Supplier ID = FN-0017?",
+    "expected": "North",
+    "aliases": []
+  },
+  {
+    "question": "What is the renewal review threshold in hours?",
+    "expected": "48",
+    "aliases": [
+      "48 hours"
+    ]
+  },
+  {
+    "question": "How many suppliers require escalation under the renewal policy?",
+    "expected": "38",
+    "aliases": []
+  },
+  {
+    "question": "What is the name of the receiving office?",
+    "expected": "Harbor House",
+    "aliases": []
+  },
+  {
+    "question": "Who is the escalation owner?",
+    "expected": "Service Desk",
+    "aliases": [
+      "The Service Desk"
+    ]
+  }
+]

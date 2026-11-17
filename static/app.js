@@ -1,0 +1,370 @@
+"use strict";
+
+const $ = id => document.getElementById(id);
+const labels = {engine: "Evidence engine", rag: "RAG baseline"};
+const state = {index: {}, model: {}, examples: [], demo: "", busy: false, ready: false};
+const drafts = new Map();
+let reportSnapshot = "";
+let reportVersion = 0;
+const fmt = value => value != null && Number.isFinite(Number(value)) ? Number(value).toLocaleString() : "Unavailable";
+const leaf = path => String(path || "").split(/[\\/]/).filter(Boolean).pop() || path;
+const sameFolder = (a, b) => {
+  if (!a || !b) return false;
+  const normalize = value => {
+    const cleaned = String(value).replace(/[\\/]+$/, "").replaceAll("\\", "/");
+    return /^[A-Z]:\//i.test(cleaned) ? cleaned.toLowerCase() : cleaned;
+  };
+  return normalize(a) === normalize(b);
+};
+function el(tag, text, cls) {
+  const n = document.createElement(tag);
+  if (text != null) n.textContent = String(text);
+  if (cls) n.className = cls;
+  return n;
+}
+function message(id, text = "", error = false) {
+  const n = $(id);
+  n.textContent = text;
+  n.classList.toggle("error", error);
+}
+async function api(path, body) {
+  const session = sessionStorage.getItem("fieldnote-session");
+  const headers = session ? {"X-Fieldnote-Session":session} : {};
+  const options = body === undefined ? {} : {
+    method: "POST", body: JSON.stringify(body)
+  };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const response = await fetch("/api/" + path, {...options, headers, cache: "no-store"});
+  let data;
+  try { data = await response.json(); }
+  catch { throw Error("The local server returned an unreadable response (" + response.status + ")."); }
+  if (!response.ok || data.error) throw Error(data.error || "Request failed (" + response.status + ").");
+  return data;
+}
+function view() {
+  const id = ["workbench", "benchmark", "sources"].includes(location.hash.slice(1)) ? location.hash.slice(1) : "workbench";
+  for (const name of ["workbench", "benchmark", "sources"]) {
+    $(name + "-view").hidden = name !== id;
+    const link = document.querySelector('nav a[href="#' + name + '"]');
+    if (name === id) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
+  }
+  document.title = $(id+"-heading").textContent + " · Fieldnote";
+  if(id === "benchmark") restoreReport();
+}
+function controls() {
+  const hasIndex = Boolean(state.index.snapshot);
+  const demoMismatch = $("suite").value === "demo" && !sameFolder(state.index.folder, state.demo);
+  for (const id of ["ask-button","run-bench","index-button","demo-button","browse","suite","refresh-runtime"]) {
+    const blocked = (id === "ask-button" || id === "run-bench") && (!hasIndex || (id === "run-bench" && (demoMismatch || !state.model.available)));
+    $(id).disabled = state.busy || blocked;
+    $(id).toggleAttribute("data-blocked", !state.busy && blocked);
+  }
+  $("suite-note").textContent = $("suite").value === "custom"
+    ? "Edit the references to match the folder you indexed."
+    : sameFolder(state.index.folder,state.demo) ? "Graded against the bundled demo references." : "Index the demo folder to run its references, or select Custom questions.";
+  if (state.ready && !state.model.available) $("suite-note").append(" Connect a local model to run the paired benchmark.");
+  $("custom-block").hidden = $("suite").value !== "custom";
+}
+function folderPrompt() {
+  const notice = $("ask-message");
+  notice.textContent = "Index a local folder to ask a question. ";
+  const b = el("button","Choose folder","text-btn");
+  b.type = "button";
+  b.onclick = () => $("folder").focus();
+  notice.append(b);
+}
+function updateStatus(s) {
+  const previous = state.index.snapshot;
+  const oldFolder = state.index.folder;
+  state.index = s.index || {};
+  state.model = s.model || {};
+  state.examples = s.examples || [];
+  state.demo = s.demo_folder || "";
+  state.ready = true;
+  const x = state.index;
+  if (x.folder && !sameFolder(oldFolder, x.folder)) {
+    if (oldFolder) drafts.set(oldFolder, {items:readFields(), json:$("cases").value, jsonMode:!$("json-editor").hidden});
+    const draft = drafts.get(x.folder);
+    setFields(draft?.items || [{}]);
+    $("cases").value = draft?.json || "";
+    showEditor(Boolean(draft?.jsonMode));
+    $("suite").value = sameFolder(x.folder, state.demo) ? "demo" : "custom";
+  }
+  if (previous !== x.snapshot) {
+    reportSnapshot = "";reportVersion++;
+    $("answers").hidden = true;
+    $("benchmark-results").hidden = true;
+    message("ask-message"); message("bench-message");
+  }
+  $("active-folder").textContent = x.folder || "No folder indexed";
+  $("ask-scope").textContent = x.snapshot ? leaf(x.folder) : "No active index";
+  if (!$("folder").value) $("folder").value = x.folder || "";
+  $("demo-button").hidden = !state.demo;
+  $("metrics").replaceChildren(...[["files","Files"],["documents","Documents"],["tables","Tables"],["rows","Table rows"]].map(([key,label])=>{
+    const d = el("div"); d.append(el("b",fmt(x[key] ?? 0)),el("span",label)); return d;
+  }));
+  $("runtime-state").textContent = state.model.available ? "Connected" : "Unavailable";
+  $("runtime-state").className = "pill " + (state.model.available ? "good":"warn");
+  $("refresh-runtime").hidden=Boolean(state.model.available);
+  $("model-name").textContent = state.model.name || "No local model connected";
+  $("model-detail").textContent = state.model.detail || (state.model.available ? "" : "Connect a local model for RAG generation. Structured queries can run directly on the index.");
+  const examples = sameFolder(x.folder,state.demo) ? state.examples : [];
+  $("suggestions").hidden = !examples.length;
+  $("examples").replaceChildren(...examples.map(question=>{
+    const b = el("button",question); b.type="button";
+    b.onclick = () => { $("question").value = question; $("question").focus(); }; return b;
+  }));
+  if (!x.snapshot) folderPrompt();
+  const inv = $("inventory"); inv.replaceChildren();
+  const issues = x.issues || [];
+  if (issues.length) {
+    inv.append(el("h2","Reading issues","small-heading"));
+    for (const i of issues) {
+      const d = el("div",null,"issue");d.append(el("strong",i.source),el("p",i.reason));inv.append(d);
+    }
+  }
+  if (!x.inventory?.length) inv.append(el("p", x.snapshot ? "No indexed files in this snapshot." : "Choose a local folder to view its files.","muted"));
+  else {
+    inv.append(el("h2","Indexed files","small-heading"));
+    for (const file of x.inventory) {
+      const row = el("div",null,"inv-row"); const n=el("div");
+      n.append(el("div",file.source,"inv-name"),el("small",fmt(file.units)+" extracted units","muted"));
+      row.append(n,el("span",file.status,"pill"));inv.append(row);
+    }
+  }
+  controls();
+  if (!$("benchmark-view").hidden) restoreReport();
+}
+async function restoreReport() {
+  const snapshot=state.index.snapshot;
+  if (!snapshot || reportSnapshot===snapshot) return;
+  const version=reportVersion;
+  reportSnapshot=snapshot;
+  try {
+    const {report}=await api("results");
+    if (version!==reportVersion || snapshot!==state.index.snapshot || !report || report.snapshot!==snapshot) return;
+    showBench(report);
+    message("bench-message","Showing the last saved benchmark for this snapshot.");
+  } catch (error) {
+    if (version===reportVersion) {
+      reportSnapshot="";
+      message("bench-message","Could not load saved results. "+error.message,true);
+    }
+  }
+}
+async function action(id, loading, run) {
+  if (state.busy) return;
+  state.busy=true; controls();message(id,loading);
+  try { await run(); }
+  catch(error) { message(id,error.message,true); }
+  finally { state.busy=false;controls(); }
+}
+function pairs(data) {
+  const dl = el("dl",null,"token-table");
+  for (const [key,value] of data) dl.append(el("dt",key),el("dd",value));
+  return dl;
+}
+function answerCard(method, value) {
+  const article=el("article",null,"answer "+method);
+  const result = value || {status:"unavailable",answer:"No result returned."};
+  const heading=el("div",null,"answer-heading");
+  const kind = result.status === "answered" ? "good" : result.status === "error" ? "bad" : "warn";
+  heading.append(el("h3",labels[method]),el("span",result.status,"pill "+kind));
+  const body=el("p",result.answer || "No answer returned.","answer-body");body.dir="auto";
+  article.append(heading,el("p",result.route,"route"),body);
+  if (result.scope) article.append(el("p",result.scope,"field-note"));
+  article.append(pairs([["Input tokens",fmt(result.input_tokens)],["Output tokens",fmt(result.output_tokens)],["Model calls",fmt(result.calls)],
+    ["Metering",result.usage_kind || "Unavailable"],["Elapsed",result.elapsed_ms == null ? "Unavailable" : fmt(result.elapsed_ms)+" ms"]]));
+  const evidence=result.evidence || [];
+  if(evidence.length) {
+    const details=el("details",null,"evidence");details.append(el("summary","Evidence ("+evidence.length+")"));
+    const ol=el("ol");
+    for(const item of evidence) {
+      const li=el("li");const text=el("p",item.text,"snippet");text.dir="auto";
+      li.append(el("p",[item.source,item.anchor].filter(Boolean).join(" · "),"locator"),text);ol.append(li);
+    }
+    details.append(ol);article.append(details);
+  }
+  return article;
+}
+function stamp(id, value) {
+  $(id).textContent = value ? "Snapshot "+String(value).slice(0,12) : "";
+  $(id).title = String(value || "");
+}
+function mark(value) {
+  if(value===true || value===1) return "matched";
+  if(value===false || value===0) return "missed";
+  return "unscored";
+}
+function makeField(label, value, className, multiline=false) {
+  const wrapper=el("label",label);
+  const input=el(multiline ? "textarea" : "input");
+  input.className=className;input.dir="auto";input.value=value || "";
+  if (multiline) input.rows=2;
+  wrapper.append(input);
+  return wrapper;
+}
+function appendCase(item={}) {
+  const fields=el("fieldset",null,"case-fields");
+  const legend=el("legend");
+  const q=makeField("Question",item.question,"case-question");
+  q.firstElementChild.maxLength=4000;
+  const answer=makeField("Expected answer",item.expected,"case-expected");
+  const options=el("div",null,"case-actions");
+  const aliases=el("details");
+  aliases.append(el("summary","Accepted alternatives"),makeField("One alternative per line",(item.aliases || []).join("\n"),"case-aliases",true));
+  const remove=el("button","Remove","text-btn");
+  remove.type="button";
+  remove.onclick=()=>{
+    const next=fields.nextElementSibling || fields.previousElementSibling;
+    fields.remove();numberCases();(next?.querySelector(".case-question") || $("add-case")).focus();
+  };
+  options.append(aliases,remove);fields.append(legend,q,answer,options);$("case-list").append(fields);
+}
+function numberCases() {
+  const rows=[...$("case-list").children];
+  rows.forEach((row,index)=>{
+    row.querySelector("legend").textContent="Entry "+(index+1);
+    const remove=row.querySelector("button");
+    remove.hidden=rows.length===1;
+    remove.setAttribute("aria-label","Remove entry "+(index+1));
+  });
+  $("add-case").disabled=rows.length>=100;
+}
+function setFields(items) {
+  $("case-list").replaceChildren();
+  for (const item of items) appendCase(item);
+  numberCases();
+}
+function readFields() {
+  return [...$("case-list").children].map(row=>({
+    question:row.querySelector(".case-question").value,
+    expected:row.querySelector(".case-expected").value,
+    aliases:row.querySelector(".case-aliases").value.split("\n").map(x=>x.trim()).filter(Boolean)
+  }));
+}
+function validateCases(items, allowIncomplete=false) {
+  if (!Array.isArray(items) || !items.length || items.length>100) throw Error("Provide between 1 and 100 questions.");
+  for (const [n, item] of items.entries()) {
+    for (const key of ["question","expected"]) {
+      if (typeof item?.[key]!=="string" || (!allowIncomplete && !item[key].trim())) {
+        throw Error("Enter "+(key==="question"?"a question":"an expected answer")+" for entry "+(n+1)+".");
+      }
+    }
+    if (item.question.length>4000) throw Error("The question for entry "+(n+1)+" exceeds 4,000 characters.");
+    if (item.aliases!==undefined && (!Array.isArray(item.aliases) || item.aliases.some(x=>typeof x!=="string" || !x.trim()))) {
+      throw Error("Supply a list of nonempty alternatives for entry "+(n+1)+".");
+    }
+  }
+  return items;
+}
+function showEditor(jsonMode) {
+  $("field-editor").hidden=jsonMode;$("json-editor").hidden=!jsonMode;
+  $("switch-editor").textContent=jsonMode ? "Edit as fields" : "Edit as JSON";
+}
+$("add-case").onclick=()=>{
+  appendCase();numberCases();$("case-list").lastElementChild.querySelector(".case-question").focus();
+};
+$("switch-editor").onclick=()=>{
+  if ($("json-editor").hidden) {
+    $("cases").value=JSON.stringify(readFields(),null,2);showEditor(true);$("cases").focus();
+  } else {
+    try {setFields(validateCases(JSON.parse($("cases").value),true));}
+    catch(error){message("bench-message",error.message,true);$("cases").focus();return;}
+    showEditor(false);$("case-list").querySelector(".case-question").focus();
+  }
+  message("bench-message");
+};
+function showBench(data) {
+  $("download").onclick=()=>{
+    const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:"application/json"}));
+    const link=el("a");link.href=url;link.download="fieldnote-benchmark-"+String(data.snapshot||"results").replace(/[^a-z0-9_-]/gi,"_")+".json";
+    link.click();setTimeout(()=>URL.revokeObjectURL(url),3000);
+  };
+  stamp("bench-snapshot",data.snapshot);
+  const board=$("scoreboard");board.replaceChildren();
+  for (const method of Object.keys(labels)) {
+    const m=data.summary[method];
+    const d=el("div",null,"scorecard "+method);
+    const percent=m.total ? Math.round(100*m.correct/m.total)+"%" : "—";
+    d.append(el("h3",labels[method]),el("p",percent,"accuracy"),el("p",fmt(m.correct)+" / "+fmt(m.total)+" coverage-qualified matches","coverage"));
+    const rawMatches = m.value_matches == null ? "Unreported" : fmt(m.value_matches)+" / "+fmt(m.total);
+    d.append(pairs([["Raw value matches",rawMatches],["Answered",fmt(m.answered)],["Errors",fmt(m.errors)],["Metered input tokens",fmt(m.input_tokens)],["Metered output tokens",fmt(m.output_tokens)],
+      ["Model calls",fmt(m.calls)],["Unmetered calls",fmt(m.unmetered_calls)]]));
+    board.append(d);
+  }
+  const runs=$("bench-runs");runs.replaceChildren();
+  for(const r of data.runs) {
+    const d=el("details",null,"bench-case");
+    const title=el("summary",r.question);
+    title.append(el("span","Evidence engine "+mark(r.engine_score)+" · RAG "+mark(r.rag_score),"outcomes"));
+    const content=el("div",null,"case-body");
+    const cards=el("div",null,"answer-grid");cards.append(answerCard("engine",r.engine),answerCard("rag",r.rag));
+    content.append(el("p","Reference answer · "+r.expected), cards);d.append(title,content);runs.append(d);
+  }
+  $("benchmark-results").hidden=false;
+}
+window.addEventListener("hashchange",()=>{
+  if (location.hash.startsWith("#pair=")) init();
+  else view();
+});
+$("refresh-runtime").onclick=()=>action("runtime-message","Checking local model…",async()=>{
+  updateStatus(await api("status"));
+  message("runtime-message",state.model.available ? "Connection ready." : "Model unavailable.");
+});
+$("suite").onchange=controls;
+$("browse").onclick=()=>action("folder-message","Choose a folder in the system dialog…",async()=>{
+  const d=await api("browse",{});if(d.folder) $("folder").value=d.folder;
+  message("folder-message",d.folder ? "Folder selected. Click Index folder to use it." : "Folder selection canceled.");
+});
+async function indexFolder(folder) {
+  if(!folder) { $("folder").focus();return; }
+  await action("folder-message","Indexing files…",async()=>{
+    await api("index",{folder});const s=await api("status");$("folder").value=s.index?.folder || folder;updateStatus(s);
+    const issues=s.index?.issues?.length || 0;
+    message("folder-message","Index ready. "+fmt(s.index?.files)+" files · "+fmt(issues)+" reading issues.");
+  });
+}
+$("folder-form").onsubmit=e=>{ e.preventDefault();indexFolder($("folder").value.trim()); };
+$("demo-button").onclick=()=>indexFolder(state.demo);
+$("ask-form").onsubmit=e=>{
+  e.preventDefault();const question=$("question").value.trim();
+  if(!question){message("ask-message","Enter a question.",true);$("question").focus();return;}
+  action("ask-message","Running both methods on the active snapshot…",async()=>{
+    const data=await api("ask",{question});
+    $("asked-question").textContent=data.question;stamp("ask-snapshot",data.snapshot);
+    $("answer-grid").replaceChildren(answerCard("engine",data.engine),answerCard("rag",data.rag));
+    $("answers").hidden=false;message("ask-message","Comparison complete.");
+  });
+};
+$("bench-form").onsubmit=e=>{
+  e.preventDefault();let payload={};
+  if($("suite").value==="custom") {
+    try{
+      const items=$("json-editor").hidden ? readFields() : JSON.parse($("cases").value);
+      payload={cases:validateCases(items)};
+    }catch(err){
+      message("bench-message",err.message,true);
+      if ($("json-editor").hidden) [...$("case-list").querySelectorAll("input")].find(field=>!field.value.trim())?.focus();
+      else $("cases").focus();
+      return;
+    }
+  }
+  action("bench-message","Benchmark running. Both methods receive each question in turn…",async()=>{
+    reportVersion++;
+    const data=await api("benchmark",payload);showBench(data);message("bench-message","Benchmark complete.");
+  });
+};
+async function init() {
+  const pairing = new URLSearchParams(location.hash.slice(1)).get("pair");
+  if (pairing) history.replaceState(null, "", location.pathname + location.search);
+  setFields([{}]);view();controls();
+  try {
+    if (pairing) {
+      const paired = await api("session", {token: pairing});
+      sessionStorage.setItem("fieldnote-session", paired.session);
+    }
+    updateStatus(await api("status"));
+  } catch(err) { message("folder-message",err.message,true); }
+}
+init();

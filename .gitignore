@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+local-runtime.json
+Demo benchmark.json
+state/
+work/
+*.sqlite*
+*.db
+*.gguf
+*.key
+*.pem
+*.log
+benchmark.json
+benchmark.tmp
+.coverage
+.DS_Store

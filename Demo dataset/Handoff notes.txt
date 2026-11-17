@@ -1,0 +1,3 @@
+Supplier intake handoff
+
+The receiving office is Harbor House. The intake acknowledgment target is 24 hours. The target is used only for intake scheduling.

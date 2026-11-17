@@ -395,7 +395,39 @@ _COMPLEX_RULE = re.compile(r"\b(?:unless|except(?:ion|ions)?|excluding|distinct|
 
 def _unsupported_rule(text):
     # “Greater than or equal to” is one ordered comparison.
-    return _COMPLEX_RULE.search(re.sub(r"\bor equal to\b", "", text, flags=re.I))
+    return _COMPLEX_RULE.search(re.sub(r"\b(greater than|less than|more than|fewer than) or equal to\b",
+                                       r"\1", text, flags=re.I))
+
+
+def _irrelevant_fields(text, headers, filters):
+    """Remove a scope phrase only when it lists entire, explicitly named fields."""
+    columns = {h.casefold() for h in headers}
+    used = {f["column"].casefold() for f in filters}
+    def replace(match):
+        names = {part.strip().casefold() for part in re.split(r"\s+(?:or|and)\s+", match[1], flags=re.I)}
+        if not names.issubset(columns):
+            return match[0]
+        if names & used:
+            raise Unresolved("The plan filters a field the source explicitly declares irrelevant.")
+        return ""
+    return re.sub(r"\b(?:regardless of|irrespective of|independent of)\s+([^.!?;\n]+)",
+                  replace, text, flags=re.I)
+
+
+def _check_equal_boundary(text, claims):
+    # An explicit statement about the exact threshold can corroborate or
+    # contradict the inclusive/exclusive comparison in the main clause.
+    for match in re.finditer(r"\bexactly\s+([+-]?\d+(?:\.\d+)?)\b([^.!?;\n]*)", text, re.I):
+        value, clause = _decimal(match[1]), match[2]
+        boundary = re.fullmatch(r"\s*(?:[\w-]+\s+)?(does not require|requires)\s+([\w -]+)", clause, re.I)
+        matching = [op for _, op, threshold in claims if threshold == value]
+        if boundary is None or len(matching) != 1:
+            raise Unresolved("An exact-threshold qualification needs review.")
+        action = boundary[2].strip()
+        if not re.search(r"\brequires?\s+" + re.escape(action) + r"\s+(?:when|if)\b",text,re.I):
+            raise Unresolved("The exact-threshold qualification could not be bound to the same decision.")
+        if (boundary[1].casefold() == "requires") != (matching[0] in (">=", "<=")):
+            raise Unresolved("The exact-threshold qualification conflicts with the stated comparison.")
 
 
 def _validate_rule_conditions(headers, filters, passages):
@@ -407,8 +439,9 @@ def _validate_rule_conditions(headers, filters, passages):
     for passage in passages:
         text = passage["text"]
         folded = text.casefold()
-        if _unsupported_rule(text):
+        if _unsupported_rule(_irrelevant_fields(text, headers, filters)):
             raise Unresolved("A cited rule contains alternatives or exceptions that require review.")
+        passage_claims = set()
         for column in headers:
             if column.casefold() not in folded:
                 continue
@@ -416,7 +449,9 @@ def _validate_rule_conditions(headers, filters, passages):
                 rule = (r"(?<!\w)" + re.escape(column) + r"(?!\w)\s*"
                         + r"(?:(?:value|is|are|must be|strictly)\s+)*" + comparison + r"\s*" + numeric)
                 for match in re.finditer(rule, text, flags=re.I):
-                    claims.add((column, op, _decimal(match[1])))
+                    passage_claims.add((column, op, _decimal(match[1])))
+        _check_equal_boundary(text, passage_claims)
+        claims.update(passage_claims)
     planned = {(f["column"], f["op"], _decimal(f["value"])) for f in filters}
     if not claims.issubset(planned):
         raise Unresolved("The plan does not preserve the comparison stated in the cited rule.")

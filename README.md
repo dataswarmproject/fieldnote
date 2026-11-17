@@ -6,7 +6,7 @@ Ask questions across a local folder of documents and spreadsheets, inspect the e
 
 ## Run it
 
-Use Python 3.11–3.14 with SQLite FTS5. Download and extract the [latest source release](https://github.com/dataswarmproject/fieldnote/releases/latest) or clone the repository.
+Use Python 3.11–3.14 with SQLite FTS5. Download and extract the source archive from [GitHub Releases](https://github.com/dataswarmproject/fieldnote/releases) or clone the repository. Consult the release notes for the platforms verified for that build.
 
 ```sh
 git clone https://github.com/dataswarmproject/fieldnote.git

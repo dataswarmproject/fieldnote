@@ -94,6 +94,29 @@ class QueryEngineTests(unittest.TestCase):
                              filters=[dict(column="Hours", op=comparison, value=15)], citations=[1])
                 self.assertEqual(self.ask(question, RecordedReply(reply))["status"], "unanswered")
 
+    def test_rule_scope_lists_and_boundary_restatements(self):
+        question = "How many vendors require immediate action under the dispatch policy?"
+        base = "A vendor requires immediate action when Hours exceeds 20"
+        for qualifier, status in (
+            (", irrespective of City or Status. Exactly 20 hours does not require immediate action.", "answered"),
+            (", regardless of City or Status. Exactly 20 hours requires immediate action.", "unanswered"),
+            (", regardless of City or Status, except for expedited dispatch.", "unanswered"),
+            (" or Status is Hold.", "unanswered"),
+        ):
+            with self.subTest(qualifier=qualifier):
+                (self.folder / "Dispatch.md").write_text(base + qualifier, encoding="utf-8")
+                indexer.index_folder(self.folder, self.db)
+                with closing(indexer.connect(self.db)) as conn:
+                    table_id = indexer.catalog(conn)[0]["id"]
+                plan = dict(table=table_id, operation="count",
+                            filters=[dict(column="Hours",op=">",value=20)], citations=[1])
+                result = self.ask(question, RecordedReply(plan))
+                self.assertEqual(result["status"], status, result["answer"])
+                if status == "answered":
+                    self.assertEqual(result["answer"], "1")
+                    plan["filters"].append(dict(column="Status",op="=",value="Status"))
+                    self.assertEqual(self.ask(question, RecordedReply(plan))["status"],"unanswered")
+
     def test_distinct_and_grouped_intents_do_not_degrade_to_row_count(self):
         for question in ("How many distinct vendors are ready?", "Count vendors per city"):
             with self.subTest(question=question):

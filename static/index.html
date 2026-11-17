@@ -25,11 +25,12 @@
   <main class="layout" id="main" tabindex="-1">
     <div class="primary">
       <section id="workbench-view" aria-labelledby="workbench-heading">
-        <div class="page-title"><h1 id="workbench-heading">Query workbench</h1><p>Ask your indexed folder a question and compare answers side by side.</p></div>
+        <div class="page-title"><h1 id="workbench-heading">Query workbench</h1><p>Ask about a fact, apply a policy to a spreadsheet, or calculate across rows.</p></div>
         <form id="ask-form" class="composer">
           <label for="question" class="label">Your question</label>
           <textarea id="question" required maxlength="4000" rows="3" dir="auto" placeholder="Ask about a document, a spreadsheet, or both…"></textarea>
-          <div class="composer-actions"><span id="ask-scope" class="scope">Waiting for index</span><button class="primary-btn" id="ask-button" type="submit">Compare answers <span aria-hidden="true">↗</span></button></div>
+          <label class="compare-option"><input type="checkbox" id="compare-rag"> Compare with RAG using a local model</label>
+          <div class="composer-actions"><span id="ask-scope" class="scope">Waiting for index</span><button class="primary-btn" id="ask-button" type="submit">Ask Fieldnote <span aria-hidden="true">↗</span></button></div>
         </form>
         <p id="ask-message" class="message" role="status"></p>
         <section id="answers" class="result-section" hidden aria-labelledby="answers-title">
@@ -52,14 +53,14 @@
               <p class="field-note">Paste a list with question, expected, and optional aliases for each entry.</p>
             </div>
           </div>
-          <details class="grading"><summary>How grading works</summary><p>Raw value matches count answer text that matches a reference or alias. Coverage-qualified accuracy also requires an answered status. A partial answer can therefore match the value and still score zero on qualified accuracy. Both measures include every question in the denominator. Matching normalizes Unicode, letter case, whitespace, and trailing sentence punctuation. Review citations separately to judge evidential support.</p></details>
+          <details class="grading"><summary>How grading works</summary><p>For answerable questions, a correct outcome requires an answered status and a value matching the reference or an alias. For questions labeled unanswerable, an explicit abstention earns credit. Overall accuracy includes every question. Raw value matches use only answerable questions and ignore status. Review citations separately to judge support.</p></details>
           <div class="suite-action"><button type="submit" class="primary-btn" id="run-bench">Run benchmark <span aria-hidden="true">↗</span></button></div>
         </form>
         <p id="bench-message" class="message" role="status"></p>
         <section id="benchmark-results" hidden><div class="section-title"><h2>Results</h2><span id="bench-snapshot" class="stamp"></span><button type="button" id="download" class="outline-btn">Download results</button></div><div id="scoreboard" class="answer-grid"></div><h3 class="small-heading">Question results</h3><div id="bench-runs"></div></section>
       </section>
       <section id="sources-view" aria-labelledby="sources-heading" hidden>
-        <div class="page-title"><h1 id="sources-heading">Source inventory</h1><p>Inspect the indexed files, extracted units, and reading issues in this snapshot.</p></div>
+        <div class="page-title"><h1 id="sources-heading">Source inventory</h1><p>Inspect the compiled knowledge, indexed files and reading issues in this snapshot.</p></div>
         <div id="inventory"></div>
       </section>
     </div>
@@ -75,9 +76,8 @@
         </form>
         <p id="folder-message" class="message" role="status"></p>
       </section>
-      <section class="runtime"><div class="section-title"><h2>Model runtime</h2><span id="runtime-state" class="pill">Checking</span></div>
+      <section class="runtime"><div class="section-title"><h2>RAG model</h2><span id="runtime-state" class="pill">Checking</span></div>
         <p id="model-name"></p><p id="model-detail" class="muted"></p>
-        <button id="refresh-runtime" type="button" class="text-btn" hidden>Check connection</button><p id="runtime-message" class="message" role="status"></p>
       </section>
     </aside>
   </main>

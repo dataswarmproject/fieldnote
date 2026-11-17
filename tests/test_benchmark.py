@@ -11,6 +11,9 @@ class NoInference:
     name = "fixture"
     available = True
 
+    def start(self):
+        pass
+
     def info(self):
         return {"name":self.name, "available":True, "detail":"test"}
 

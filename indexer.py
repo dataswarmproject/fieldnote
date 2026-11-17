@@ -14,12 +14,13 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from zipfile import ZipFile
 from defusedxml import ElementTree as ET
+import knowledge
 from index_worker import wait_for_worker, worker_environment
 
 
 FORMATS = {".txt", ".md", ".pdf", ".docx", ".csv", ".xlsx"}
 SPREADSHEETS = {".csv", ".xlsx"}
-PARSER_VERSION = "fieldnote-index-v2"
+PARSER_VERSION = "fieldnote-index-v3:" + knowledge.VERSION
 CHUNK_SIZE = 1200
 OVERLAP = 120
 MIB = 1024 * 1024
@@ -71,6 +72,7 @@ def _initialize(conn):
         CREATE VIRTUAL TABLE IF NOT EXISTS units USING fts5(source,anchor,body,kind UNINDEXED);
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks USING fts5(source,anchor,body);
     """)
+    knowledge.initialize(conn)
 
 
 def _walk(folder, database, report):
@@ -182,6 +184,7 @@ class Writer:
         self._pending = ""
         self._start = self._end = ""
         self.warnings = set()
+        self.compiler = knowledge.SourceCompiler(conn, source)
         self.first_unit = self.last_unit = self.first_chunk = self.last_chunk = None
 
     def warn(self, message):
@@ -195,13 +198,15 @@ class Writer:
                 self.first_chunk = self.last_chunk
         self._pending = ""
 
-    def unit(self, anchor, text, kind="document"):
+    def unit(self, anchor, text, kind="document", *, knowledge_text=None):
         if not text.strip():
             return
         self.n += 1
         self.chars += len(text)
         if self.n > MAX_UNITS or self.chars > MAX_EXTRACTED_CHARS:
             raise ValueError("Source exceeds the per-file extracted text or record limit.")
+        if kind == "document":
+            self.compiler.unit(anchor, text if knowledge_text is None else knowledge_text)
         for part in _windows(text):
             self.last_unit = self.conn.execute("INSERT INTO units VALUES (?,?,?,?)", (self.source, anchor, part, kind)).lastrowid
             if self.first_unit is None:
@@ -229,14 +234,16 @@ def _text_units(handle, writer, markdown):
     def emit():
         if pending:
             anchor = f"line {start}" if start == end else f"lines {start}–{end}"
-            writer.unit(anchor, ((heading + "\n") if heading else "") + "\n".join(pending))
+            prose = "\n".join(pending)
+            writer.unit(anchor, ((heading + "\n") if heading else "") + prose, knowledge_text=prose)
             pending.clear()
 
     for n, line in enumerate(text.splitlines(), 1):
         if markdown and re.match(r"^#{1,6}\s", line):
             emit()
             heading = line.strip()
-            writer.unit(f"line {n}", heading)
+            writer.compiler.heading(f"line {n}", heading.lstrip("#").strip())
+            writer.unit(f"line {n}", heading, knowledge_text="")
         elif line.strip():
             if not pending:
                 start = n
@@ -410,7 +417,7 @@ def _forget(conn, source):
         for table, first, last in (("chunks", "first_chunk", "last_chunk"), ("units", "first_unit", "last_unit")):
             if span[first] is not None:
                 conn.execute(f"DELETE FROM {table} WHERE rowid BETWEEN ? AND ?", (span[first],span[last]))
-    for table in ("sources", "issues", "sheets", "source_ranges"):
+    for table in ("sources", "issues", "sheets", "source_ranges", *knowledge.TABLES):
         conn.execute(f"DELETE FROM {table} WHERE source=?", (source,))
 
 
@@ -484,6 +491,7 @@ def _read_file(conn, path, root, source, prior, remaining):
             for reason in sorted(writer.warnings):
                 conn.execute("INSERT INTO issues VALUES(?,?)", (source, reason))
             state = "partial" if writer.warnings else "indexed"
+            writer.compiler.finish(partial=bool(writer.warnings))
             conn.execute("INSERT INTO sources VALUES(?,?,?,?,?)", (source, digest, kind, state, writer.n))
     except (sqlite3.Error, MemoryError, FolderLimit):
         raise
@@ -549,7 +557,7 @@ def _refresh(root, database):
             meta = _meta(conn)
             previous = {r["source"]: r for r in conn.execute("SELECT * FROM sources")}
             if meta.get("folder") != str(root) or meta.get("parser") != PARSER_VERSION:
-                for table in ("records", "sources", "sheets", "issues", "units", "chunks", "source_ranges"):
+                for table in ("records", "sources", "sheets", "issues", "units", "chunks", "source_ranges", *knowledge.TABLES):
                     conn.execute(f"DELETE FROM {table}")
                 previous = {}
             else:
@@ -569,6 +577,7 @@ def _refresh(root, database):
                 stamp.update(json.dumps(tuple(item)).encode())
             for item in conn.execute("SELECT source,reason FROM issues ORDER BY source,reason"):
                 stamp.update(json.dumps(tuple(item)).encode())
+            knowledge.publish(conn)
             conn.executemany("INSERT OR REPLACE INTO index_meta VALUES(?,?)",
                 [("folder", str(root)), ("parser", PARSER_VERSION), ("snapshot", stamp.hexdigest()[:20])])
 
@@ -576,6 +585,7 @@ def _refresh(root, database):
 def status_from_connection(conn):
     meta = _meta(conn)
     return dict(folder=meta.get("folder"), snapshot=meta.get("snapshot"),
+        knowledge=knowledge.summary(conn),
         files=conn.execute("SELECT COUNT(*) FROM sources").fetchone()[0],
         documents=conn.execute("SELECT COUNT(*) FROM sources WHERE kind='document' AND units>0").fetchone()[0],
         tables=conn.execute("SELECT COUNT(*) FROM sheets").fetchone()[0],
@@ -585,7 +595,8 @@ def status_from_connection(conn):
 
 
 def status(db_path):
-    empty = dict(folder=None, snapshot=None, files=0, documents=0, tables=0, rows=0, issues=[], inventory=[])
+    empty = dict(folder=None, snapshot=None, files=0, documents=0, tables=0, rows=0, issues=[],
+                 inventory=[], knowledge=knowledge.summary())
     if not Path(db_path).is_file():
         return empty
     with closing(connect(db_path)) as conn:
@@ -604,9 +615,9 @@ def table_rows(conn, table_id):
     head = conn.execute("SELECT headers FROM sheets WHERE id=?", (table_id,)).fetchone()
     if head:
         width = len(json.loads(head[0]))
-        for r in conn.execute("SELECT anchor,cells FROM records WHERE sheet_id=? ORDER BY row_num", (table_id,)):
+        for r in conn.execute("SELECT row_num,anchor,cells FROM records WHERE sheet_id=? ORDER BY row_num", (table_id,)):
             values = json.loads(r["cells"])
-            yield {"anchor": r["anchor"], "values": values + [None] * (width - len(values))}
+            yield {"row_num": r["row_num"], "anchor": r["anchor"], "values": values + [None] * (width - len(values))}
 
 
 def _search(conn, query, limit, baseline=False, docs_only=False):

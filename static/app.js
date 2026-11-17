@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = id => document.getElementById(id);
-const labels = {engine: "Evidence engine", rag: "RAG baseline"};
+const labels = {engine: "Compiled engine", rag: "RAG baseline"};
 const state = {index: {}, model: {}, examples: [], demo: "", busy: false, ready: false};
 const drafts = new Map();
 let reportSnapshot = "";
@@ -52,17 +52,17 @@ function view() {
   if(id === "benchmark") restoreReport();
 }
 function controls() {
-  const hasIndex = Boolean(state.index.snapshot);
+  const hasIndex = Boolean(state.index.snapshot) && !state.index.knowledge?.needs_reindex;
   const demoMismatch = $("suite").value === "demo" && !sameFolder(state.index.folder, state.demo);
-  for (const id of ["ask-button","run-bench","index-button","demo-button","browse","suite","refresh-runtime"]) {
-    const blocked = (id === "ask-button" || id === "run-bench") && (!hasIndex || (id === "run-bench" && (demoMismatch || !state.model.available)));
+  for (const id of ["ask-button","compare-rag","run-bench","index-button","demo-button","browse","suite"]) {
+    const blocked = (id === "ask-button" || id === "run-bench") && (!hasIndex || (id === "run-bench" && demoMismatch));
     $(id).disabled = state.busy || blocked;
     $(id).toggleAttribute("data-blocked", !state.busy && blocked);
   }
   $("suite-note").textContent = $("suite").value === "custom"
     ? "Edit the references to match the folder you indexed."
     : sameFolder(state.index.folder,state.demo) ? "Graded against the bundled demo references." : "Index the demo folder to run its references, or select Custom questions.";
-  if (state.ready && !state.model.available) $("suite-note").append(" Connect a local model to run the paired benchmark.");
+  if (state.ready && !state.model.available) $("suite-note").append(" Running a paired benchmark connects the configured local model.");
   $("custom-block").hidden = $("suite").value !== "custom";
 }
 function folderPrompt() {
@@ -103,19 +103,32 @@ function updateStatus(s) {
   $("metrics").replaceChildren(...[["files","Files"],["documents","Documents"],["tables","Tables"],["rows","Table rows"]].map(([key,label])=>{
     const d = el("div"); d.append(el("b",fmt(x[key] ?? 0)),el("span",label)); return d;
   }));
-  $("runtime-state").textContent = state.model.available ? "Connected" : "Unavailable";
-  $("runtime-state").className = "pill " + (state.model.available ? "good":"warn");
-  $("refresh-runtime").hidden=Boolean(state.model.available);
+  $("runtime-state").textContent = state.model.available ? "Connected" : state.model.on_demand ? "On demand" : "Unavailable";
+  $("runtime-state").className = "pill " + (state.model.available ? "good" : state.model.on_demand ? "" : "warn");
   $("model-name").textContent = state.model.name || "No local model connected";
   $("model-detail").textContent = state.model.detail || (state.model.available ? "" : "Connect a local model for RAG generation. Structured queries can run directly on the index.");
-  const examples = sameFolder(x.folder,state.demo) ? state.examples : [];
+  const examples = state.examples;
   $("suggestions").hidden = !examples.length;
   $("examples").replaceChildren(...examples.map(question=>{
     const b = el("button",question); b.type="button";
     b.onclick = () => { $("question").value = question; $("question").focus(); }; return b;
   }));
   if (!x.snapshot) folderPrompt();
+  if (x.knowledge?.needs_reindex) message("folder-message","Click Index folder to compile this folder for the updated engine.");
   const inv = $("inventory"); inv.replaceChildren();
+  if (x.knowledge?.version) {
+    const k = x.knowledge;
+    inv.append(el("h2","Compilation","small-heading"),pairs([["Active facts",fmt(k.facts)],["Active rules",fmt(k.rules)],["Withheld assertions",fmt(k.blocked)],["Unsupported source statements or blocks",fmt(k.omissions)]]));
+    if (k.gaps?.length) {
+      const detail=el("details",null,"evidence");
+      detail.append(el("summary","Inspect "+fmt(k.gaps.length)+" of "+fmt(k.omissions)+" omissions"));
+      const list=el("ol");
+      for (const gap of k.gaps) {
+        const li=el("li");li.append(el("strong",gap.source+" · "+gap.anchor),el("p",gap.reason));list.append(li);
+      }
+      detail.append(list);inv.append(detail);
+    }
+  }
   const issues = x.issues || [];
   if (issues.length) {
     inv.append(el("h2","Reading issues","small-heading"));
@@ -175,6 +188,11 @@ function answerCard(method, value) {
   if (result.scope) article.append(el("p",result.scope,"field-note"));
   article.append(pairs([["Input tokens",fmt(result.input_tokens)],["Output tokens",fmt(result.output_tokens)],["Model calls",fmt(result.calls)],
     ["Metering",result.usage_kind || "Unavailable"],["Elapsed",result.elapsed_ms == null ? "Unavailable" : fmt(result.elapsed_ms)+" ms"]]));
+  if (result.proof) {
+    const details=el("details",null,"evidence");
+    details.append(el("summary","Derivation"),el("pre",JSON.stringify(result.proof,null,2),"derivation"));
+    article.append(details);
+  }
   const evidence=result.evidence || [];
   if(evidence.length) {
     const details=el("details",null,"evidence");details.append(el("summary","Evidence ("+evidence.length+")"));
@@ -210,6 +228,11 @@ function appendCase(item={}) {
   const q=makeField("Question",item.question,"case-question");
   q.firstElementChild.maxLength=4000;
   const answer=makeField("Expected answer",item.expected,"case-expected");
+  const expectation=el("label",null,"compare-option");
+  const abstain=el("input");abstain.type="checkbox";abstain.className="case-abstain";abstain.checked=item.answerable===false;
+  expectation.append(abstain,document.createTextNode("The sources cannot answer this question"));
+  const toggle=()=>{answer.hidden=abstain.checked;};
+  abstain.onchange=toggle;toggle();
   const options=el("div",null,"case-actions");
   const aliases=el("details");
   aliases.append(el("summary","Accepted alternatives"),makeField("One alternative per line",(item.aliases || []).join("\n"),"case-aliases",true));
@@ -219,7 +242,7 @@ function appendCase(item={}) {
     const next=fields.nextElementSibling || fields.previousElementSibling;
     fields.remove();numberCases();(next?.querySelector(".case-question") || $("add-case")).focus();
   };
-  options.append(aliases,remove);fields.append(legend,q,answer,options);$("case-list").append(fields);
+  options.append(aliases,remove);fields.append(legend,q,expectation,answer,options);$("case-list").append(fields);
 }
 function numberCases() {
   const rows=[...$("case-list").children];
@@ -239,13 +262,15 @@ function setFields(items) {
 function readFields() {
   return [...$("case-list").children].map(row=>({
     question:row.querySelector(".case-question").value,
-    expected:row.querySelector(".case-expected").value,
+    expected:row.querySelector(".case-abstain").checked ? "[unanswerable]" : row.querySelector(".case-expected").value,
+    answerable:!row.querySelector(".case-abstain").checked,
     aliases:row.querySelector(".case-aliases").value.split("\n").map(x=>x.trim()).filter(Boolean)
   }));
 }
 function validateCases(items, allowIncomplete=false) {
   if (!Array.isArray(items) || !items.length || items.length>100) throw Error("Provide between 1 and 100 questions.");
   for (const [n, item] of items.entries()) {
+    if (item?.answerable!==undefined && typeof item.answerable!=="boolean") throw Error("Answerable must be true or false for entry "+(n+1)+".");
     for (const key of ["question","expected"]) {
       if (typeof item?.[key]!=="string" || (!allowIncomplete && !item[key].trim())) {
         throw Error("Enter "+(key==="question"?"a question":"an expected answer")+" for entry "+(n+1)+".");
@@ -287,9 +312,9 @@ function showBench(data) {
     const m=data.summary[method];
     const d=el("div",null,"scorecard "+method);
     const percent=m.total ? Math.round(100*m.correct/m.total)+"%" : "—";
-    d.append(el("h3",labels[method]),el("p",percent,"accuracy"),el("p",fmt(m.correct)+" / "+fmt(m.total)+" coverage-qualified matches","coverage"));
-    const rawMatches = m.value_matches == null ? "Unreported" : fmt(m.value_matches)+" / "+fmt(m.total);
-    d.append(pairs([["Raw value matches",rawMatches],["Answered",fmt(m.answered)],["Errors",fmt(m.errors)],["Metered input tokens",fmt(m.input_tokens)],["Metered output tokens",fmt(m.output_tokens)],
+    d.append(el("h3",labels[method]),el("p",percent,"accuracy"),el("p",fmt(m.correct)+" / "+fmt(m.total)+" correct outcomes","coverage"));
+    const rawMatches = m.value_matches == null ? "Unreported" : fmt(m.value_matches)+" / "+fmt(m.answerable ?? m.total);
+    d.append(pairs([["Raw value matches",rawMatches],["Correct abstentions",fmt(m.correct_abstentions ?? 0)+" / "+fmt(m.unanswerable ?? 0)],["Answered",fmt(m.answered)],["Errors",fmt(m.errors)],["Metered input tokens",fmt(m.input_tokens)],["Metered output tokens",fmt(m.output_tokens)],
       ["Model calls",fmt(m.calls)],["Unmetered calls",fmt(m.unmetered_calls)]]));
     board.append(d);
   }
@@ -297,7 +322,7 @@ function showBench(data) {
   for(const r of data.runs) {
     const d=el("details",null,"bench-case");
     const title=el("summary",r.question);
-    title.append(el("span","Evidence engine "+mark(r.engine_score)+" · RAG "+mark(r.rag_score),"outcomes"));
+    title.append(el("span",labels.engine+" "+mark(r.engine_score)+" · RAG "+mark(r.rag_score),"outcomes"));
     const content=el("div",null,"case-body");
     const cards=el("div",null,"answer-grid");cards.append(answerCard("engine",r.engine),answerCard("rag",r.rag));
     content.append(el("p","Reference answer · "+r.expected), cards);d.append(title,content);runs.append(d);
@@ -307,10 +332,6 @@ function showBench(data) {
 window.addEventListener("hashchange",()=>{
   if (location.hash.startsWith("#pair=")) init();
   else view();
-});
-$("refresh-runtime").onclick=()=>action("runtime-message","Checking local model…",async()=>{
-  updateStatus(await api("status"));
-  message("runtime-message",state.model.available ? "Connection ready." : "Model unavailable.");
 });
 $("suite").onchange=controls;
 $("browse").onclick=()=>action("folder-message","Choose a folder in the system dialog…",async()=>{
@@ -330,11 +351,14 @@ $("demo-button").onclick=()=>indexFolder(state.demo);
 $("ask-form").onsubmit=e=>{
   e.preventDefault();const question=$("question").value.trim();
   if(!question){message("ask-message","Enter a question.",true);$("question").focus();return;}
-  action("ask-message","Running both methods on the active snapshot…",async()=>{
-    const data=await api("ask",{question});
+  const paired=$("compare-rag").checked;
+  action("ask-message",paired ? "Running both methods on the active snapshot…" : "Querying the compiled index…",async()=>{
+    const data=await api("ask",{question,mode:paired ? "both" : "engine"});
     $("asked-question").textContent=data.question;stamp("ask-snapshot",data.snapshot);
-    $("answer-grid").replaceChildren(answerCard("engine",data.engine),answerCard("rag",data.rag));
-    $("answers").hidden=false;message("ask-message","Comparison complete.");
+    $("answer-grid").replaceChildren(answerCard("engine",data.engine));
+    if (paired) $("answer-grid").append(answerCard("rag",data.rag));
+    $("answers").hidden=false;message("ask-message");
+    if (paired) updateStatus(await api("status"));
   });
 };
 $("bench-form").onsubmit=e=>{
@@ -352,7 +376,8 @@ $("bench-form").onsubmit=e=>{
   }
   action("bench-message","Benchmark running. Both methods receive each question in turn…",async()=>{
     reportVersion++;
-    const data=await api("benchmark",payload);showBench(data);message("bench-message","Benchmark complete.");
+    try { const data=await api("benchmark",payload);showBench(data);message("bench-message","Benchmark complete."); }
+    finally { updateStatus(await api("status")); }
   });
 };
 async function init() {

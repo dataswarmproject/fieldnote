@@ -25,6 +25,7 @@ from provider import LocalModel, NoRedirect, read_local_config
 ROOT = Path(__file__).resolve().parent
 DEMO = ROOT / "Demo dataset"
 CASES = json.loads((ROOT / "demo-cases.json").read_text(encoding="utf-8"))
+VERSION = "0.3.0-dev"
 
 
 def create_app(state, provider, port, stop_token=None, launch_token=None):
@@ -100,7 +101,7 @@ def create_app(state, provider, port, stop_token=None, launch_token=None):
     def health():
         challenge = request.args.get("challenge", "")
         proof = hmac.digest(launch_token.encode("ascii"), challenge.encode("utf-8"), "sha256").hex()
-        return jsonify(application="Fieldnote", version="0.2.0", proof=proof)
+        return jsonify(application="Fieldnote", version=VERSION, proof=proof)
 
     @app.post("/api/session")
     def pair():
@@ -128,7 +129,10 @@ def create_app(state, provider, port, stop_token=None, launch_token=None):
     @app.get("/api/status")
     def status():
         snapshot = indexer.status(db)
-        examples = [c["question"] for c in CASES] if snapshot["folder"] == str(DEMO) else []
+        examples = []
+        if snapshot["snapshot"] and not snapshot["knowledge"]["needs_reindex"]:
+            examples = ([c["question"] for c in CASES] if snapshot["folder"] == str(DEMO)
+                        else engine.examples(db, snapshot=snapshot["snapshot"]))
         return jsonify(index=snapshot, model=provider.info(), demo_folder=str(DEMO), examples=examples)
 
     @app.get("/api/cases")
@@ -140,7 +144,8 @@ def create_app(state, provider, port, stop_token=None, launch_token=None):
         report_path = state / "benchmark.json"
         if report_path.exists():
             saved = json.loads(report_path.read_text(encoding="utf-8"))
-            if saved.get("snapshot") == indexer.status(db)["snapshot"]:
+            snapshot = indexer.status(db)
+            if not snapshot["knowledge"]["needs_reindex"] and saved.get("snapshot") == snapshot["snapshot"]:
                 return jsonify(report=saved)
         return jsonify(report=None)
 
@@ -174,17 +179,20 @@ def create_app(state, provider, port, stop_token=None, launch_token=None):
 
     @app.post("/api/ask")
     def ask():
-        question = body().get("question")
+        obj = body()
+        question = obj.get("question")
+        mode = obj.get("mode", "engine")
+        if mode not in ("both", "engine"):
+            raise ValueError("Choose engine or both for the query mode.")
         if not isinstance(question, str) or not 1 <= len(question.strip()) <= 4000:
             raise ValueError("Enter a question of up to 4,000 characters.")
-        if not indexer.status(db)["snapshot"]:
-            raise ValueError("Index a folder before asking a question.")
         if not activity.acquire(blocking=False):
             return jsonify(error="A question or folder picker is already running."), 409
         try:
-            provider.info()
-            result = engine.compare(str(db), question.strip(), provider)
-            result["model"] = provider.name
+            if mode == "both":
+                provider.start()
+            result = engine.compare(str(db), question.strip(), provider if mode == "both" else None, mode=mode)
+            result["model"] = provider.name if mode == "both" else None
             return jsonify(result)
         finally:
             activity.release()
@@ -198,9 +206,12 @@ def create_app(state, provider, port, stop_token=None, launch_token=None):
             info = indexer.status(db)
             if not info["snapshot"]:
                 raise ValueError("Index a folder first.")
+            if info["knowledge"]["needs_reindex"]:
+                return jsonify(error="Click Index folder to compile the selected folder for this version."), 409
             if "cases" not in obj and info["folder"] != str(DEMO):
                 raise ValueError("Supply expected answers for this folder, or index the bundled demo.")
             selected = benchmark.validate(obj.get("cases", CASES))
+            provider.start()
             if not provider.info()["available"]:
                 return jsonify(error="A local model must be ready for a paired RAG benchmark."), 503
             report = benchmark.run(db, selected, provider, info["snapshot"])
@@ -246,7 +257,7 @@ def verify_running(http, url, keyfile, challenge):
         matches = False
     if not matches:
         raise RuntimeError("Existing server belongs to a different session or version. Stop its original launcher or choose another port and state folder.")
-    return credentials
+    return credentials, health.get("version", "unknown")
 
 
 def serve_local(app, port, state, credentials, provider, open_browser):
@@ -278,7 +289,6 @@ def serve_local(app, port, state, credentials, provider, open_browser):
         app.config["STOP_SERVER"] = stopping.set
         if not indexer.status(state / "index.sqlite")["snapshot"]:
             indexer.index_folder(DEMO, state / "index.sqlite")
-        provider.start()
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=state, delete=False) as handle:
             json.dump(credentials, handle)
         os.replace(handle.name, keyfile)
@@ -320,9 +330,10 @@ def main():
     try:
         state = (args.state or state_directory()).expanduser().resolve()
         keyfile = state / f"server-{args.port}.key"
-        credentials = verify_running(http, url, keyfile, secrets.token_hex(16))
+        running = verify_running(http, url, keyfile, secrets.token_hex(16))
+        credentials, server_version = running if running else (None, None)
         if args.status:
-            print("Fieldnote is running." if credentials else "Fieldnote is stopped.")
+            print(f"Fieldnote is running. Version {server_version}." if credentials else "Fieldnote is stopped.")
             return
         if args.stop:
             if credentials:
@@ -334,6 +345,8 @@ def main():
                 print("Fieldnote is stopped.")
             return
         if credentials:
+            if server_version != VERSION:
+                raise RuntimeError(f"Fieldnote {server_version} is running. Use app.py --stop with the same port and state, then app.py --open to launch {VERSION}.")
             if args.open:
                 webbrowser.open(url + "/#pair=" + credentials["launch"])
             else:

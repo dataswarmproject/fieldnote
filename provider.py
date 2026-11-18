@@ -32,7 +32,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 class LocalModel:
     def __init__(self, state_dir):
         self.available = False
-        self.detail = "The local model starts when you request a RAG comparison."
+        self.detail = "The local model starts when you select Schema Query Compiler or RAG."
         self.started = False
         self.name = "Local model"
         self.base = ""
@@ -170,11 +170,15 @@ class LocalModel:
             self._native_template = False
             return None
 
-    def complete(self, system, user):
+    def complete(self, system, user, *, response_schema=None):
         if not self.available:
             raise RuntimeError(self.detail)
         data = {"model": self.name, "temperature": 0, "max_tokens": 500, "stream": False,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+        if response_schema is not None:
+            data["max_tokens"] = 256
+            data["response_format"] = {"type": "json_schema", "json_schema": {
+                "name": "schema_query_plan", "strict": True, "schema": response_schema}}
         with self._inference_lock:
             try:
                 result = self._request("/chat/completions", data, timeout=180)

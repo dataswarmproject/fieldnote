@@ -1,7 +1,7 @@
 "use strict";
 
 const $ = id => document.getElementById(id);
-const labels = {engine: "Compiled engine", rag: "RAG baseline"};
+const labels = {engine: "Compiled engine", compiler: "Schema Query Compiler", rag: "RAG baseline"};
 const state = {index: {}, model: {}, examples: [], demo: "", busy: false, ready: false};
 const drafts = new Map();
 let reportSnapshot = "";
@@ -48,13 +48,13 @@ function view() {
     const link = document.querySelector('nav a[href="#' + name + '"]');
     if (name === id) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
   }
-  document.title = $(id+"-heading").textContent + " · Fieldnote";
+  document.title = $(id+"-heading").textContent + " · Local Dataset Query Engine";
   if(id === "benchmark") restoreReport();
 }
 function controls() {
   const hasIndex = Boolean(state.index.snapshot) && !state.index.knowledge?.needs_reindex;
   const demoMismatch = $("suite").value === "demo" && !sameFolder(state.index.folder, state.demo);
-  for (const id of ["ask-button","compare-rag","run-bench","index-button","demo-button","browse","suite"]) {
+  for (const id of ["ask-button","compare-rag","use-compiler","run-bench","index-button","demo-button","browse","suite"]) {
     const blocked = (id === "ask-button" || id === "run-bench") && (!hasIndex || (id === "run-bench" && demoMismatch));
     $(id).disabled = state.busy || blocked;
     $(id).toggleAttribute("data-blocked", !state.busy && blocked);
@@ -303,12 +303,13 @@ $("switch-editor").onclick=()=>{
 function showBench(data) {
   $("download").onclick=()=>{
     const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:"application/json"}));
-    const link=el("a");link.href=url;link.download="fieldnote-benchmark-"+String(data.snapshot||"results").replace(/[^a-z0-9_-]/gi,"_")+".json";
+    const link=el("a");link.href=url;link.download="local-dataset-query-engine-benchmark-"+String(data.snapshot||"results").replace(/[^a-z0-9_-]/gi,"_")+".json";
     link.click();setTimeout(()=>URL.revokeObjectURL(url),3000);
   };
   stamp("bench-snapshot",data.snapshot);
   const board=$("scoreboard");board.replaceChildren();
-  for (const method of Object.keys(labels)) {
+  const primary=data.summary.compiler ? "compiler" : "engine";
+  for (const method of [primary,"rag"]) {
     const m=data.summary[method];
     const d=el("div",null,"scorecard "+method);
     const percent=m.total ? Math.round(100*m.correct/m.total)+"%" : "—";
@@ -322,9 +323,9 @@ function showBench(data) {
   for(const r of data.runs) {
     const d=el("details",null,"bench-case");
     const title=el("summary",r.question);
-    title.append(el("span",labels.engine+" "+mark(r.engine_score)+" · RAG "+mark(r.rag_score),"outcomes"));
+    title.append(el("span",labels[primary]+" "+mark(r[primary+"_score"])+" · RAG "+mark(r.rag_score),"outcomes"));
     const content=el("div",null,"case-body");
-    const cards=el("div",null,"answer-grid");cards.append(answerCard("engine",r.engine),answerCard("rag",r.rag));
+    const cards=el("div",null,"answer-grid");cards.append(answerCard(primary,r[primary]),answerCard("rag",r.rag));
     content.append(el("p","Reference answer · "+r.expected), cards);d.append(title,content);runs.append(d);
   }
   $("benchmark-results").hidden=false;
@@ -352,13 +353,16 @@ $("ask-form").onsubmit=e=>{
   e.preventDefault();const question=$("question").value.trim();
   if(!question){message("ask-message","Enter a question.",true);$("question").focus();return;}
   const paired=$("compare-rag").checked;
-  action("ask-message",paired ? "Running both methods on the active snapshot…" : "Querying the compiled index…",async()=>{
-    const data=await api("ask",{question,mode:paired ? "both" : "engine"});
+  const compiler=$("use-compiler").checked;
+  const mode=compiler ? (paired ? "compiler_rag" : "compiler") : (paired ? "both" : "engine");
+  action("ask-message",paired ? "Running both methods on the active snapshot…" : compiler ? "Compiling a spreadsheet query…" : "Querying the compiled index…",async()=>{
+    const data=await api("ask",{question,mode});
     $("asked-question").textContent=data.question;stamp("ask-snapshot",data.snapshot);
-    $("answer-grid").replaceChildren(answerCard("engine",data.engine));
+    const method=compiler ? "compiler" : "engine";
+    $("answer-grid").replaceChildren(answerCard(method,data[method]));
     if (paired) $("answer-grid").append(answerCard("rag",data.rag));
     $("answers").hidden=false;message("ask-message");
-    if (paired) updateStatus(await api("status"));
+    if (paired || compiler) updateStatus(await api("status"));
   });
 };
 $("bench-form").onsubmit=e=>{
@@ -375,6 +379,7 @@ $("bench-form").onsubmit=e=>{
     }
   }
   action("bench-message","Benchmark running. Both methods receive each question in turn…",async()=>{
+    payload.mode=$("bench-compiler").checked ? "compiler_rag" : "both";
     reportVersion++;
     try { const data=await api("benchmark",payload);showBench(data);message("bench-message","Benchmark complete."); }
     finally { updateStatus(await api("status")); }

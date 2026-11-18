@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>Fieldnote · Local evidence workspace</title>
+  <title>Local Dataset Query Engine · Local evidence workspace</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/static/style.css">
   <script defer src="/static/app.js"></script>
@@ -13,7 +13,7 @@
   <a class="skip" href="#main">Skip to workspace</a>
   <header class="mast">
     <div class="mast-inner">
-      <a href="#workbench" class="brand" aria-label="Fieldnote workbench"><span class="mark" aria-hidden="true"><i></i></span>Fieldnote</a>
+      <a href="#workbench" class="brand" aria-label="Local Dataset Query Engine workbench"><span class="mark" aria-hidden="true"><i></i></span>Local Dataset Query Engine</a>
       <nav aria-label="Workspace views">
         <a href="#workbench" aria-current="page">Workbench</a>
         <a href="#benchmark">Benchmark</a>
@@ -29,8 +29,9 @@
         <form id="ask-form" class="composer">
           <label for="question" class="label">Your question</label>
           <textarea id="question" required maxlength="4000" rows="3" dir="auto" placeholder="Ask about a document, a spreadsheet, or both…"></textarea>
+          <label class="compare-option"><input type="checkbox" id="use-compiler"> Use Schema Query Compiler for a spreadsheet question</label>
           <label class="compare-option"><input type="checkbox" id="compare-rag"> Compare with RAG using a local model</label>
-          <div class="composer-actions"><span id="ask-scope" class="scope">Waiting for index</span><button class="primary-btn" id="ask-button" type="submit">Ask Fieldnote <span aria-hidden="true">↗</span></button></div>
+          <div class="composer-actions"><span id="ask-scope" class="scope">Waiting for index</span><button class="primary-btn" id="ask-button" type="submit">Run query <span aria-hidden="true">↗</span></button></div>
         </form>
         <p id="ask-message" class="message" role="status"></p>
         <section id="answers" class="result-section" hidden aria-labelledby="answers-title">
@@ -43,6 +44,7 @@
         <div class="page-title"><h1 id="benchmark-heading">Benchmark</h1><p>Run both methods on the same questions and source snapshot. The grader compares their answers with your references.</p></div>
         <form class="suite" id="bench-form">
           <label for="suite" class="label">Question set</label>
+          <label class="compare-option"><input type="checkbox" id="bench-compiler"> Evaluate Schema Query Compiler against RAG</label>
           <select id="suite"><option value="demo">Bundled demo questions</option><option value="custom">Custom questions</option></select>
           <p class="field-note" id="suite-note">The bundled references apply to the demo folder.</p>
           <div id="custom-block" hidden>
@@ -76,7 +78,7 @@
         </form>
         <p id="folder-message" class="message" role="status"></p>
       </section>
-      <section class="runtime"><div class="section-title"><h2>RAG model</h2><span id="runtime-state" class="pill">Checking</span></div>
+      <section class="runtime"><div class="section-title"><h2>Local model</h2><span id="runtime-state" class="pill">Checking</span></div>
         <p id="model-name"></p><p id="model-detail" class="muted"></p>
       </section>
     </aside>

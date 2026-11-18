@@ -38,11 +38,11 @@ def main():
             key = state / f"server-{port}.key"
             for _ in range(240):
                 if child.poll() is not None:
-                    raise RuntimeError(f"Fieldnote exited during startup with status {child.returncode}")
+                    raise RuntimeError(f"Local Dataset Query Engine exited during startup with status {child.returncode}")
                 if key.exists():
                     break
                 time.sleep(.25)
-            assert api("health")["version"] == "0.3.0-dev"
+            assert api("health")["version"] == "0.3.0-dev.2"
             try:
                 api("status")
             except urllib.error.HTTPError as exc:

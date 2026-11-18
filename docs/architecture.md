@@ -1,6 +1,6 @@
-# Fieldnote architecture
+# Local Dataset Query Engine architecture
 
-Fieldnote is a knowledge-based question answering system for a local folder. Its main design bet is to interpret supported assertions once, when a source changes. At query time the executor looks up a fact or applies a typed operation over rows. The snapshot retains enough information to show which assertion and rows justified an answer. Language-model generation belongs to the separately selectable RAG baseline.
+Local Dataset Query Engine interprets supported assertions when a source changes. Its default path resolves a fact or applies a typed operation without inference. For spreadsheet questions, the optional Schema Query Compiler uses a small local model to translate everyday language into a plan for the same row executor. A separate RAG baseline generates short answers from retrieved text.
 
 ```mermaid
 flowchart TB
@@ -16,6 +16,9 @@ flowchart TB
     B --> S
     Q["Question from paired local browser"] --> A["Authenticated loopback API"]
     A --> E["Question grammar and symbol binding"]
+    A -->|"Optional spreadsheet interpretation"| SC["Schema Query Compiler: question and schema IDs"]
+    SC --> PV["Validate structured plan, column IDs, operands and literals"]
+    PV --> X
     S --> E
     E --> X["Fact resolution, rule application or full table scan"]
     X --> R["Value, partial result or abstention; execution trace and anchors"]
@@ -42,6 +45,7 @@ flowchart TB
 | Component | Contract and failure behavior |
 |---|---|
 | Browser and HTTP boundary · `app.py`, `static/` | The single-user service binds IPv4 loopback. A paired tab supplies a session cookie and origin-scoped header. `POST /api/ask` defaults to `mode: "engine"`. Use `mode: "both"` for an explicit paired comparison. |
+| Schema Query Compiler · `query_compiler.py`, `engine.py`, `provider.py` | Set `mode: "compiler"` or `"compiler_rag"`. Provide the local model with a bounded schema and the user's question. Constrain decoding to a JSON plan, validate the plan independently and execute it in the same snapshot. Supported operations cover one table, one optional projection and up to four conjunctive filters. |
 | Source reader · `index_worker.py`, `indexer.py` | Discover ordinary files below the selected root. Skip hidden and linked entries. Decode supported formats, record digests, preserve document anchors and spreadsheet row coordinates, and report extraction issues. |
 | Knowledge compiler · `knowledge.py` | Parse bounded declarative sentences into keyed scalar facts and numeric rules. Preserve the literal value, unit, source, and anchor. Recognized restricted scopes and unsupported clauses withhold assertions. An unsupported passage may reduce coverage across its source. |
 | Snapshot store · `indexer.py` | SQLite stores source metadata, facts, rules, compilation gaps, typed rows and comparison passages. A refresh replaces changed or deleted source records transactionally. A changed compiler version requires reindexing. A reader pins a transaction before either method runs. |

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import indexer
 import knowledge
+import query_compiler
 
 
 _AGGREGATE_WORDS = {
@@ -145,9 +146,10 @@ class Meter:
                 raise Unresolved("The question and required passage exceed the input budget.")
             candidates.pop()
 
-    def complete(self, system, user):
+    def complete(self, system, user, *, response_schema=None):
         self.calls.append({"input_tokens": None, "output_tokens": None, "usage_kind": "unknown"})
-        reply, usage = self.provider.complete(system, user)
+        options = {"response_schema": response_schema} if response_schema is not None else {}
+        reply, usage = self.provider.complete(system, user, **options)
         for key in ("input_tokens", "output_tokens"):
             count = usage.get(key)
             if type(count) is int and count >= 0:
@@ -579,6 +581,36 @@ def _engine(conn, question, meter):
     return _fact(conn, question)
 
 
+def _compile_query(conn, question, meter):
+    tables = indexer.catalog(conn)
+    schema = query_compiler.describe(tables)
+    role = query_compiler.NAME
+    if schema is None:
+        return _result("Select a folder with 1–24 sheets and up to 256 columns in total.", "unanswered", role)
+    if not meter.provider.available:
+        return _result("Connect a local model to compile this question.", "unavailable", role)
+    payload = json.dumps(dict(question=question, tables=schema), ensure_ascii=False, separators=(",", ":"))
+    if len(payload.encode("utf-8")) > 65536:
+        return _result("The table schema exceeds the compiler input limit.", "unanswered", role)
+    system = query_compiler.INSTRUCTION
+    user, _ = meter.fit(system, lambda entries: entries[0], [payload])
+    raw = meter.complete(system, user, response_schema=query_compiler.SCHEMA)
+    plan = query_compiler.bind(_json_object(raw), tables, question)
+    if plan is None:
+        return _result("The model could not bind the whole question to the supported table operations.", "unanswered", role)
+    table, op, col, filters = plan
+    if col is not None:
+        _header(table, col)
+    for predicate in filters:
+        _header(table, predicate["column"])
+        if predicate["op"] not in {"=", "!="} and _decimal(predicate["value"]) is None:
+            raise query_compiler.InvalidPlan("An ordered comparison requires a numeric literal.")
+    result = _execute(conn, table, op, col, filters)
+    result["route"] = role
+    result["scope"] = "Model-interpreted question · " + result["scope"]
+    return result
+
+
 def _rag(conn, question, meter):
     entries = indexer.baseline_chunks(conn, question, 5)
     # A single source may present an explicitly reported total. This special
@@ -660,14 +692,18 @@ def examples(db_path, limit=6, *, snapshot=None):
     return (first + counts + facts[len(first):])[:limit]
 
 
+METHODS = {"engine": ("engine",), "rag": ("rag",), "both": ("engine", "rag"),
+           "compiler": ("compiler",), "compiler_rag": ("compiler", "rag")}
+
+
 def compare(db_path, question, provider=None, mode="both"):
     """Run selected methods against the same index read transaction and provider."""
     if not isinstance(question, str) or not question.strip() or len(question) > 4000:
         raise ValueError("Enter a question between 1 and 4,000 characters.")
-    if mode not in {"engine", "rag", "both"}:
-        raise ValueError("Choose engine, rag, or both.")
+    if mode not in METHODS:
+        raise ValueError("Unknown query mode.")
     if provider is None and mode != "engine":
-        raise ValueError("A provider is required for the RAG comparator.")
+        raise ValueError("This query mode requires a model provider.")
     question = question.strip()
     if not Path(db_path).is_file():
         raise ValueError("Index a folder before asking a question.")
@@ -683,9 +719,9 @@ def compare(db_path, question, provider=None, mode="both"):
             raise ValueError("Reindex this folder to compile it for this version.")
         response = dict(question=question, snapshot=revision[0],
                         provider="local execution" if mode == "engine" else provider.name)
-        for name, run in (("engine", _engine), ("rag", _rag)):
-            if mode not in {name, "both"}:
-                continue
+        runners = {"engine": _engine, "rag": _rag, "compiler": _compile_query}
+        for name in METHODS[mode]:
+            run = runners[name]
             meter = Meter(provider)
             start = time.perf_counter()
             try:
@@ -699,9 +735,11 @@ def compare(db_path, question, provider=None, mode="both"):
                     if warnings:
                         item["status"] = "partial"
                         item["scope"] += " · Indexing caveats: " + " ".join(warnings)
-            except Unresolved as exc:
+            except (Unresolved, query_compiler.InvalidPlan) as exc:
                 if name == "rag":
                     item = _result(str(exc), "error", "RAG request or response error")
+                elif name == "compiler":
+                    item = _result(str(exc), "error", query_compiler.NAME)
                 else:
                     item = _result(str(exc), "unanswered", "Insufficient support",
                                    scope="The compiled index could not establish a unique supported answer.")

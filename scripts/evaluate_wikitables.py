@@ -86,13 +86,13 @@ def values_match(prediction, expected):
 
 
 def evaluate(dataset_root, provider=None, mode="engine"):
-    if mode not in {"both", "engine"}:
-        raise ValueError("Choose engine or both.")
-    if mode == "both" and (provider is None or not provider.available):
-        raise ValueError("Paired evaluation requires one available local model for RAG.")
+    if mode not in {"both", "engine", "compiler", "compiler_rag"}:
+        raise ValueError("Unknown external benchmark mode.")
+    if mode != "engine" and (provider is None or not provider.available):
+        raise ValueError("This evaluation requires an available local model.")
     provider = provider or OfflineProvider()
-    methods = ("engine", "rag") if mode == "both" else ("engine",)
-    model = provider.name if mode == "both" else "local execution"
+    methods = benchmark.engine.METHODS[mode]
+    model = provider.name if mode != "engine" else "local execution"
     rows, tables = load_slice(dataset_root)
     cases = []
     start = time.monotonic()
@@ -144,11 +144,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("dataset_root", type=Path, help="Local upstream checkout at " + REVISION)
     parser.add_argument("--paired", action="store_true", help="Use an existing FIELDNOTE_MODEL_URL for RAG.")
+    parser.add_argument("--compiler", action="store_true", help="Use the schema-only model role for spreadsheet questions.")
     parser.add_argument("--output", type=Path, help="Write per-ID JSON report (default: stdout).")
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="fieldnote-provider-") as state:
-        provider = command_provider(parser, args.paired, state)
-        report = evaluate(args.dataset_root, provider, mode="both" if args.paired else "engine")
+        provider = command_provider(parser, args.paired or args.compiler, state)
+        mode = ("compiler_rag" if args.paired else "compiler") if args.compiler else ("both" if args.paired else "engine")
+        report = evaluate(args.dataset_root, provider, mode=mode)
     if args.output:
         args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(report["summary"], indent=2))

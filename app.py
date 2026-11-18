@@ -1,4 +1,4 @@
-"""Fieldnote single-user loopback application."""
+"""Local Dataset Query Engine single-user loopback application."""
 
 import argparse
 import hmac
@@ -25,7 +25,7 @@ from provider import LocalModel, NoRedirect, read_local_config
 ROOT = Path(__file__).resolve().parent
 DEMO = ROOT / "Demo dataset"
 CASES = json.loads((ROOT / "demo-cases.json").read_text(encoding="utf-8"))
-VERSION = "0.3.0-dev"
+VERSION = "0.3.0-dev.2"
 
 
 def create_app(state, provider, port, stop_token=None, launch_token=None):
@@ -58,7 +58,7 @@ def create_app(state, provider, port, stop_token=None, launch_token=None):
                 if not (supplied_cookie.isascii() and supplied_key.isascii()
                         and secrets.compare_digest(supplied_cookie, browser_session)
                         and secrets.compare_digest(supplied_key, origin_key)):
-                    abort(401, "Open Fieldnote with the launcher or run python app.py --open to pair this browser.")
+                    abort(401, "Open Local Dataset Query Engine with the launcher or run python app.py --open to pair this browser.")
         if request.method == "POST":
             if not request.is_json:
                 abort(415)
@@ -80,7 +80,7 @@ def create_app(state, provider, port, stop_token=None, launch_token=None):
                 400 if isinstance(err, (ValueError, FileNotFoundError, PermissionError)) else 500)
         if code >= 500:
             app.logger.exception("Request failed")
-            return jsonify(error="The request failed. See the local Fieldnote console for details."), code
+            return jsonify(error="The request failed. See the local Local Dataset Query Engine console for details."), code
         return jsonify(error=str(err)), code
 
     def body():
@@ -101,7 +101,7 @@ def create_app(state, provider, port, stop_token=None, launch_token=None):
     def health():
         challenge = request.args.get("challenge", "")
         proof = hmac.digest(launch_token.encode("ascii"), challenge.encode("utf-8"), "sha256").hex()
-        return jsonify(application="Fieldnote", version=VERSION, proof=proof)
+        return jsonify(application="Local Dataset Query Engine", version=VERSION, proof=proof)
 
     @app.post("/api/session")
     def pair():
@@ -182,17 +182,17 @@ def create_app(state, provider, port, stop_token=None, launch_token=None):
         obj = body()
         question = obj.get("question")
         mode = obj.get("mode", "engine")
-        if mode not in ("both", "engine"):
-            raise ValueError("Choose engine or both for the query mode.")
+        if mode not in ("both", "engine", "compiler", "compiler_rag"):
+            raise ValueError("Unknown query mode.")
         if not isinstance(question, str) or not 1 <= len(question.strip()) <= 4000:
             raise ValueError("Enter a question of up to 4,000 characters.")
         if not activity.acquire(blocking=False):
             return jsonify(error="A question or folder picker is already running."), 409
         try:
-            if mode == "both":
+            if mode != "engine":
                 provider.start()
-            result = engine.compare(str(db), question.strip(), provider if mode == "both" else None, mode=mode)
-            result["model"] = provider.name if mode == "both" else None
+            result = engine.compare(str(db), question.strip(), provider if mode != "engine" else None, mode=mode)
+            result["model"] = provider.name if mode != "engine" else None
             return jsonify(result)
         finally:
             activity.release()
@@ -211,10 +211,13 @@ def create_app(state, provider, port, stop_token=None, launch_token=None):
             if "cases" not in obj and info["folder"] != str(DEMO):
                 raise ValueError("Supply expected answers for this folder, or index the bundled demo.")
             selected = benchmark.validate(obj.get("cases", CASES))
+            mode = obj.get("mode", "both")
+            if mode not in ("both", "compiler_rag"):
+                raise ValueError("Choose a paired benchmark mode.")
             provider.start()
             if not provider.info()["available"]:
                 return jsonify(error="A local model must be ready for a paired RAG benchmark."), 503
-            report = benchmark.run(db, selected, provider, info["snapshot"])
+            report = benchmark.run(db, selected, provider, info["snapshot"], mode=mode)
             report["suite"] = "custom" if "cases" in obj else "bundled demo"
             temporary = state / "benchmark.tmp"
             temporary.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -233,10 +236,15 @@ def state_directory():
     if configured:
         return (ROOT / Path(configured).expanduser()).resolve()
     if os.name == "nt":
-        return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "Fieldnote/state"
-    if sys.platform == "darwin":
-        return Path.home() / "Library/Application Support/Fieldnote"
-    return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "fieldnote"
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+        legacy, current = base / "Fieldnote/state", base / "Local Dataset Query Engine/state"
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library/Application Support"
+        legacy, current = base / "Fieldnote", base / "Local Dataset Query Engine"
+    else:
+        base = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+        legacy, current = base / "fieldnote", base / "local-dataset-query-engine"
+    return legacy if legacy.is_dir() and not current.exists() else current
 
 
 def verify_running(http, url, keyfile, challenge):
@@ -247,8 +255,8 @@ def verify_running(http, url, keyfile, challenge):
         if isinstance(exc.reason, ConnectionRefusedError):
             return None
         raise RuntimeError("Could not verify the service on the selected port.") from exc
-    if not isinstance(health, dict) or health.get("application") != "Fieldnote" or not keyfile.is_file():
-        raise RuntimeError("Port is occupied by another service or Fieldnote state directory.")
+    if not isinstance(health, dict) or health.get("application") not in ("Local Dataset Query Engine", "Fieldnote") or not keyfile.is_file():
+        raise RuntimeError("Port is occupied by another service or Local Dataset Query Engine state directory.")
     try:
         credentials = json.loads(keyfile.read_text(encoding="utf-8"))
         expected = hmac.digest(credentials["launch"].encode("ascii"), challenge.encode("ascii"), "sha256").hex()
@@ -281,7 +289,7 @@ def serve_local(app, port, state, credentials, provider, open_browser):
         try:
             lease.execute("BEGIN EXCLUSIVE")
         except sqlite3.OperationalError as exc:
-            raise RuntimeError("Another Fieldnote process is using this state directory.") from exc
+            raise RuntimeError("Another Local Dataset Query Engine process is using this state directory.") from exc
         server = create_server(app, host="127.0.0.1", port=port, map=sockets,
                                threads=6, connection_limit=64, max_request_body_size=2 * 1024 * 1024,
                                max_request_header_size=32768, expose_tracebacks=False)
@@ -293,7 +301,7 @@ def serve_local(app, port, state, credentials, provider, open_browser):
             json.dump(credentials, handle)
         os.replace(handle.name, keyfile)
         registered = True
-        print(f"Fieldnote is running at {url}. Use --open to pair a browser.", flush=True)
+        print(f"Local Dataset Query Engine is running at {url}. Use --open to pair a browser.", flush=True)
         if open_browser:
             webbrowser.open(url + "/#pair=" + credentials["launch"])
         while not stopping.is_set():
@@ -313,7 +321,7 @@ def serve_local(app, port, state, credentials, provider, open_browser):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fieldnote local evidence workbench")
+    parser = argparse.ArgumentParser(description="Local Dataset Query Engine local evidence workbench")
     parser.add_argument("--port", type=int, default=os.environ.get("FIELDNOTE_PORT", "18741"))
     parser.add_argument("--state", type=Path, help="Private directory for this instance's index and session")
     action = parser.add_mutually_exclusive_group()
@@ -333,24 +341,24 @@ def main():
         running = verify_running(http, url, keyfile, secrets.token_hex(16))
         credentials, server_version = running if running else (None, None)
         if args.status:
-            print(f"Fieldnote is running. Version {server_version}." if credentials else "Fieldnote is stopped.")
+            print(f"Local Dataset Query Engine is running. Version {server_version}." if credentials else "Local Dataset Query Engine is stopped.")
             return
         if args.stop:
             if credentials:
                 payload = json.dumps({"token":credentials["stop"]}).encode()
                 req = urllib.request.Request(url + "/api/stop", data=payload, headers={"Content-Type":"application/json"})
                 with http.open(req, timeout=5):
-                    print("Stopping Fieldnote.")
+                    print("Stopping Local Dataset Query Engine.")
             else:
-                print("Fieldnote is stopped.")
+                print("Local Dataset Query Engine is stopped.")
             return
         if credentials:
             if server_version != VERSION:
-                raise RuntimeError(f"Fieldnote {server_version} is running. Use app.py --stop with the same port and state, then app.py --open to launch {VERSION}.")
+                raise RuntimeError(f"Local Dataset Query Engine {server_version} is running. Use app.py --stop with the same port and state, then app.py --open to launch {VERSION}.")
             if args.open:
                 webbrowser.open(url + "/#pair=" + credentials["launch"])
             else:
-                print("Fieldnote is running. Use --open to pair a browser.")
+                print("Local Dataset Query Engine is running. Use --open to pair a browser.")
             return
         credentials = {key: secrets.token_urlsafe(32) for key in ("launch", "stop")}
         provider = LocalModel(state)
@@ -359,7 +367,7 @@ def main():
     except KeyboardInterrupt:
         pass
     except (RuntimeError, ValueError, OSError) as exc:
-        parser.exit(1, f"Fieldnote: {exc}\n")
+        parser.exit(1, f"Local Dataset Query Engine: {exc}\n")
 
 
 if __name__ == "__main__":

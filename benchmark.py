@@ -77,9 +77,9 @@ def summarize(runs, methods):
 
 
 def run(db_path, cases, provider, snapshot, mode="both"):
-    if mode not in {"engine", "both", "rag"}:
-        raise ValueError("Choose engine, rag, or both.")
-    methods = ("engine", "rag") if mode == "both" else (mode,)
+    if mode not in engine.METHODS:
+        raise ValueError("Unknown benchmark mode.")
+    methods = engine.METHODS[mode]
     runs = []
     start = time.monotonic()
     model = "local execution" if mode == "engine" else provider.name

@@ -23,6 +23,8 @@ def validate(cases):
                 raise ValueError(f"Each case requires a nonempty string for {key}.")
         if len(case["question"]) > 4000 or len(case["expected"]) > 4000:
             raise ValueError("Questions and expected answers may be up to 4,000 characters.")
+        if type(case.get("answerable", True)) is not bool:
+            raise ValueError("answerable must be true or false.")
         aliases = case.get("aliases", [])
         if (not isinstance(aliases, list) or len(aliases) > 32
                 or not all(isinstance(a, str) and a.strip() and len(a) <= 4000 for a in aliases)):
@@ -30,43 +32,80 @@ def validate(cases):
     return cases
 
 
-def run(db_path, cases, provider, snapshot):
-    runs = []
-    summary = {method: dict(total=len(cases), correct=0, value_matches=0, answered=0, errors=0, calls=0,
-                            input_tokens=0, output_tokens=0, unmetered_calls=0)
-               for method in ("engine", "rag")}
-    start = time.monotonic()
-    model = provider.name
-    for case in validate(cases):
-        pair = engine.compare(str(db_path), case["question"], provider)
-        if pair["snapshot"] != snapshot:
-            raise ValueError("Dataset changed during evaluation. Rerun on the current index.")
-        if provider.name != model or pair.get("provider", model) != model:
-            raise ValueError("Model changed during evaluation. Rerun with one selected model.")
-        pair.update(expected=case["expected"], aliases=case.get("aliases", []))
-        acceptable = {normalize(label) for label in (case["expected"], *case.get("aliases", []))}
-        for method in summary:
+def summarize(runs, methods):
+    summary = {}
+    for method in methods:
+        stats = dict(total=len(runs), correct=0, answerable=0, unanswerable=0, correct_answers=0,
+                     correct_abstentions=0, value_matches=0, answered=0, answered_answerable=0,
+                     false_answers=0, unanswered=0, unavailable=0, partial=0, errors=0, calls=0, input_tokens=0,
+                     output_tokens=0, unmetered_calls=0)
+        for pair in runs:
             result = pair[method]
-            matches = normalize(result["answer"]) in acceptable
-            score = result["status"] == "answered" and matches
-            pair[method + "_score"] = score
-            pair[method + "_value_match"] = matches
-            stats = summary[method]
-            stats["correct"] += int(score)
-            stats["value_matches"] += int(matches)
-            stats["answered"] += int(result["status"] == "answered")
+            answered = result["status"] == "answered"
+            stats["answered"] += int(answered)
+            stats["unanswered"] += int(result["status"] == "unanswered")
+            stats["unavailable"] += int(result["status"] == "unavailable")
+            stats["partial"] += int(result["status"] == "partial")
             stats["errors"] += int(result["status"] == "error")
+            correct = pair[method + "_score"]
+            stats["correct"] += int(correct)
+            if pair["answerable"]:
+                stats["answerable"] += 1
+                stats["answered_answerable"] += int(answered)
+                stats["correct_answers"] += int(correct)
+                stats["value_matches"] += int(pair[method + "_value_match"])
+            else:
+                stats["unanswerable"] += 1
+                stats["correct_abstentions"] += int(correct)
+                stats["false_answers"] += int(answered)
             calls = result["calls"]
             stats["calls"] += calls
             for key in ("input_tokens", "output_tokens"):
                 stats[key] += result.get("metered_" + key, result.get(key)) or 0
             stats["unmetered_calls"] += result.get("unmetered_calls", calls if (
                 result.get("input_tokens") is None or result.get("output_tokens") is None) else 0)
+        for metric, numerator, denominator in (
+            ("accuracy", "correct", "total"), ("answer_coverage", "answered", "total"),
+            ("answerable_accuracy", "correct_answers", "answerable"),
+            ("answerable_coverage", "answered_answerable", "answerable"),
+            ("abstention_accuracy", "correct_abstentions", "unanswerable"),
+            ("value_match_rate", "value_matches", "answerable"),
+        ):
+            stats[metric] = stats[numerator] / stats[denominator] if stats[denominator] else None
+        summary[method] = stats
+    return summary
+
+
+def run(db_path, cases, provider, snapshot, mode="both"):
+    if mode not in engine.METHODS:
+        raise ValueError("Unknown benchmark mode.")
+    methods = engine.METHODS[mode]
+    runs = []
+    start = time.monotonic()
+    model = "local execution" if mode == "engine" else provider.name
+    for case in validate(cases):
+        args = str(db_path), case["question"], provider
+        pair = engine.compare(*args) if mode == "both" else engine.compare(*args, mode=mode)
+        if pair["snapshot"] != snapshot:
+            raise ValueError("Dataset changed during evaluation. Rerun on the current index.")
+        if mode != "engine" and (provider.name != model or pair.get("provider", model) != model):
+            raise ValueError("Model changed during evaluation. Rerun with one selected model.")
+        pair.update(expected=case["expected"], aliases=case.get("aliases", []),
+                    answerable=case.get("answerable", True))
+        acceptable = {normalize(label) for label in (case["expected"], *case.get("aliases", []))}
+        for method in methods:
+            result = pair[method]
+            if pair["answerable"]:
+                matches = normalize(result["answer"]) in acceptable
+                correct = result["status"] == "answered" and matches
+            else:
+                matches = None
+                correct = result["status"] == "unanswered"
+            pair[method + "_value_match"] = matches
+            pair[method + "_score"] = correct
         runs.append(pair)
-    for stats in summary.values():
-        stats["accuracy"] = stats["correct"] / len(cases)
-        stats["value_match_rate"] = stats["value_matches"] / len(cases)
+    summary = summarize(runs, methods)
     return dict(runs=runs, summary=summary, snapshot=snapshot, model=model,
                 generated_at=datetime.now(timezone.utc).isoformat(), seconds=round(time.monotonic()-start,2),
-                grading="Correct requires answered status and normalized exact match with a reference or alias. Value matches compare answer text independently of coverage status. All cases stay in both denominators.",
-                token_accounting="Backend-reported prompt and generated tokens across calls. Deterministic steps use zero model tokens.")
+                grading="Accuracy counts exact answered values on answerable cases and explicit unanswered status on unanswerable cases. Errors and partial results are incorrect. Raw value matches ignore status on answerable cases. Undefined rates are null.",
+                token_accounting="Input and output totals cover backend-metered usage. Unmetered calls are listed separately. Deterministic operations use zero model tokens.")

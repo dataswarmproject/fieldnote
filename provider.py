@@ -32,7 +32,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 class LocalModel:
     def __init__(self, state_dir):
         self.available = False
-        self.detail = "Checking the local model service."
+        self.detail = "The local model starts when you select Schema Query Compiler or RAG."
+        self.started = False
         self.name = "Local model"
         self.base = ""
         self.key = ""
@@ -41,7 +42,6 @@ class LocalModel:
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         self._lock = threading.Lock()
         self._inference_lock = threading.Lock()
-        self._last_probe = 0
         self.input_budget = int(os.environ.get("FIELDNOTE_INPUT_BUDGET", "4096"))
         if self.input_budget < 1:
             raise ValueError("FIELDNOTE_INPUT_BUDGET must be a positive integer.")
@@ -86,6 +86,15 @@ class LocalModel:
 
     def start(self):
         with self._lock:
+            if self.child is not None and self.child.poll() is not None:
+                self.child = None
+                self.available = False
+            if self.started and self.available:
+                return
+            if self.child and self.child.poll() is None and self._probe():
+                return
+            self.close()
+            self.started = True
             try:
                 endpoint = os.environ.get("FIELDNOTE_MODEL_URL")
                 if endpoint:
@@ -130,10 +139,8 @@ class LocalModel:
                 self.detail = str(exc)
 
     def info(self):
-        if self.base and not self.available and not self._lock.locked() and time.monotonic() - self._last_probe > 5:
-            self._last_probe = time.monotonic()
-            self._probe()
-        return {"available": self.available, "name": self.name, "detail": self.detail}
+        return {"available": self.available, "on_demand": not self.started,
+                "name": self.name, "detail": self.detail}
 
     def count_prompt(self, system, user):
         if self._native_template is False:
@@ -152,16 +159,26 @@ class LocalModel:
             if exc.code in (404, 405, 501):
                 self._native_template = False
                 return None
+            self.available = False
+            self.detail = f"Local tokenizer returned HTTP {exc.code}."
+            raise
+        except OSError:
+            self.available = False
+            self.detail = "Local model connection failed during token counting."
             raise
         except (KeyError, ValueError):
             self._native_template = False
             return None
 
-    def complete(self, system, user):
+    def complete(self, system, user, *, response_schema=None):
         if not self.available:
             raise RuntimeError(self.detail)
         data = {"model": self.name, "temperature": 0, "max_tokens": 500, "stream": False,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+        if response_schema is not None:
+            data["max_tokens"] = 256
+            data["response_format"] = {"type": "json_schema", "json_schema": {
+                "name": "schema_query_plan", "strict": True, "schema": response_schema}}
         with self._inference_lock:
             try:
                 result = self._request("/chat/completions", data, timeout=180)

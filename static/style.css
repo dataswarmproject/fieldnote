@@ -88,6 +88,10 @@ button{border-radius:5px;font-weight:600}
 .result-section,#benchmark-results{margin-top:30px}
 .asked{font-weight:550;margin:12px 0;overflow-wrap:anywhere}
 .answer-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.answer-grid > :only-child{grid-column:1/-1}
+.compare-option{display:flex;gap:8px;align-items:center;width:fit-content;margin-top:12px;font-size:14px;cursor:pointer}
+.compare-option input{width:auto;accent-color:var(--green)}
+.derivation{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 var(--mono)}
 .answer,.scorecard{min-width:0;padding:15px;border:1px solid var(--line);border-radius:6px;background:var(--white);border-top:3px solid #9baba3}
 .answer.engine,.scorecard.engine{border-top-color:var(--green)}
 .answer-body,.snippet{white-space:pre-wrap;overflow-wrap:anywhere}

@@ -10,13 +10,28 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app import ROOT, create_app
 from provider import LocalModel
 
 
 class LocalRuntimeTests(unittest.TestCase):
+    def test_expired_readiness_is_rechecked_after_a_stopped_child_or_connection(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
+            model = LocalModel(directory)
+            model.available = model.started = True
+            model.child = Mock()
+            model.child.poll.return_value = 1
+            with patch("provider.read_local_config", return_value={}):
+                model.start()
+            self.assertFalse(model.info()["available"])
+            self.assertIsNone(model.child)
+            model.available = True
+            with patch.object(model, "_request", side_effect=ConnectionRefusedError), self.assertRaises(OSError):
+                model.count_prompt("system", "question")
+            self.assertFalse(model.info()["available"])
+
     def test_pairing_and_origin_policy(self):
         with tempfile.TemporaryDirectory() as directory:
             app = create_app(directory, None, 18741, launch_token="test-session")

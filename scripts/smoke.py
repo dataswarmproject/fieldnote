@@ -38,11 +38,11 @@ def main():
             key = state / f"server-{port}.key"
             for _ in range(240):
                 if child.poll() is not None:
-                    raise RuntimeError(f"Fieldnote exited during startup with status {child.returncode}")
+                    raise RuntimeError(f"Local Dataset Query Engine exited during startup with status {child.returncode}")
                 if key.exists():
                     break
                 time.sleep(.25)
-            assert api("health")["version"] == "0.2.0"
+            assert api("health")["version"] == "0.3.0-dev.2"
             try:
                 api("status")
             except urllib.error.HTTPError as exc:
@@ -51,12 +51,15 @@ def main():
                 raise AssertionError("An unpaired client was given access")
             launch = json.loads(key.read_text(encoding="utf-8"))["launch"]
             headers["X-Fieldnote-Session"] = api("session", {"token":launch})["session"]
-            assert api("status")["index"]["rows"] == 96
+            first = api("status")
+            assert first["index"]["rows"] == 96 and first["model"]["on_demand"]
             folder = Path(tmp, "counts")
             folder.mkdir()
             (folder / "items.csv").write_text("ID,Site\n1,West\n2,West\n3,East\n", encoding="utf-8")
             assert api("index", {"folder":str(folder)})["rows"] == 3
-            result = api("ask", {"question":"How many items have Site = West?"})["engine"]
+            response = api("ask", {"question":"How many items have Site = West?"})
+            assert "rag" not in response and api("status")["model"]["on_demand"]
+            result = response["engine"]
             assert (result["answer"], result["status"], result["input_tokens"]) == ("2","answered",0)
             subprocess.run([*args, "--stop"], check=True, timeout=15, env=env)
             assert child.wait(timeout=15) == 0 and not key.exists()
